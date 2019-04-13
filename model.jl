@@ -7,7 +7,7 @@ struct Chain; layers; end
 
 
 mutable struct RAM
-    stddev
+    σ
     glimpse_net
     controller
     location_net
@@ -17,13 +17,35 @@ end
 
 
 function RAM(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
-             glimpse_hidden, stddev, hidden_size, num_classes)
-    glimpse_net = GlimpseNet(loc_hidden, glimpse_hidden, patch_size,
-                             num_patches, glimpse_scale, num_channels)
-    controller = RNN(hidden_size, hidden_size)
-    location_net = LocationNet(hidden_size, 2, stddev)
-    softmax_layer = Linear(hidden_size, num_classes)
-    baseline_net = BaselineNet(hidden_size, 1)
+             glimpse_hidden, σ, hidden_size, num_classes)
+    return RAM(
+        σ,
+        GlimpseNet(loc_hidden, glimpse_hidden, patch_size,
+                   num_patches, glimpse_scale, num_channels),
+        RNN(hidden_size, hidden_size),
+        LocationNet(hidden_size, 2, σ),
+        Linear(hidden_size, num_classes),
+        BaselineNet(hidden_size, 1))
+end
+
+
+# just one step
+function (ram::RAM)(x, l_prev, h_prev, last=false)
+    gt = ram.glimpse_net(l_prev)
+    ht = ram.controller(gt, h_prev)
+    μ, lt = ram.location_net(ht)
+    bt = baseline_net(ht)
+    σ = ram.σ
+    σ² = σ .^ 2
+    logπ = -((lt - μ) ^ 2) / 2σ² - log(σ) - log(√2π)
+    logp̂ = ifelse(!last, nothing, logp(ram.linear(mat(ht))))
+    return ht, lt, bt, logπ, logp̂
+end
+
+
+# all timesteps
+function (ram::RAM)(x)
+
 end
 
 
@@ -39,7 +61,8 @@ end
 function GlimpseNet(
     loc_hidden, glimpse_hidden, patch_size, num_patches, scale, num_channels)
     retina = Retina(patch_size, num_patches, scale)
-    fc1 = FullyConnected(patch_size*num_patches*num_patches*num_channels)
+    fc1 = FullyConnected(
+        patch_size*num_patches*num_patches*num_channels, glimpse_hidden)
     fc2 = FullyConnected(2, loc_hidden)
     fc3 = Linear(glimpse_hidden, glimpse_hidden+loc_hidden)
     fc4 = Linear(loc_hidden, glimpse_hidden+loc_hidden)
@@ -132,28 +155,27 @@ end
 
 
 function exceeds(from_x, to_x, from_y, to_y, T)
-    return from_x < 0 || from_y < 0 || to_x > T or to_y > T
+    return from_x < 0 || from_y < 0 || to_x > T || to_y > T
 end
 
 
-
 mutable struct LocationNet
-    stddev
+    σ
     layer
 end
 
 
-function LocationNet(input_size::Int, output_size::Int, stddev)
-    layer = Linear(input_size, output_size, tanh)
-    return LocationNet(stddev, layer)
+function LocationNet(input_size::Int, output_size::Int, σ)
+    layer = Linear(input_size, output_size)
+    return LocationNet(σ, layer)
 end
 
 
 function (m::LocationNet)(ht)
-    mu = m.layer(ht)
-    noise = randn!(similar(mu))
-    lt = mu .+ noise .* stddev
-    return mu, tanh.(lt)
+    μ = m.layer(ht)
+    noise = randn!(similar(μ))
+    lt = μ .+ noise .* m.σ
+    return μ, tanh.(lt)
 end
 
 
