@@ -43,7 +43,8 @@ function (ram::RAM)(x, l_prev, last=false)
     bt = ram.baseline_net(ht)
     σ = ram.σ
     σ² = σ .^ 2
-    logπ = -((lt - μ) .^ 2) / 2σ² .- log(σ) .- log(√2π)
+    logπ = -(abs.(lt - μ) .^ 2) / 2σ² .- log(σ) .- log(√2π)
+    logπ = sum(logπ, dims=2)
     # logp̂ = ifelse(!last, nothing, logp(ram.linear(mat(ht))))
     return ht, lt, bt, logπ
 end
