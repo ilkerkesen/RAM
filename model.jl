@@ -2,10 +2,28 @@ using Knet
 using Sloth
 import Base: eltype
 using Random
+using Statistics
 
 
 struct Chain; layers; end
 (c::Chain)(x) = (for l in c.layers; x = l(x); end; x)
+
+mutable struct VanillaRNN
+    i2h
+    h2h
+end
+
+
+VanillaRNN(input_size::Int, hidden_size::Int) = VanillaRNN(
+    Linear(input_size, hidden_size; bias=false),
+    Linear(hidden_size, hidden_size; bias=false))
+
+
+function (m::VanillaRNN)(x, h)
+    i2h = m.i2h(x)
+    h2h = m.h2h(h)
+    relu.(i2h .+ h2h)
+end
 
 
 mutable struct RAM
@@ -16,6 +34,7 @@ mutable struct RAM
     location_net
     softmax_layer
     baseline_net
+    locations
 end
 
 
@@ -26,41 +45,66 @@ function RAM(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
         num_glimpses,
         GlimpseNet(loc_hidden, glimpse_hidden, patch_size,
                    num_patches, glimpse_scale, num_channels),
-        RNN(hidden_size, hidden_size; rnnType=:relu),
+        # RNN(hidden_size, hidden_size; rnnType=:relu),
+        VanillaRNN(hidden_size, hidden_size),
         LocationNet(hidden_size, 2, σ),
         Linear(hidden_size, num_classes),
-        BaselineNet(hidden_size, 1))
+        BaselineNet(hidden_size, 1),
+        [])
 end
 
 
 # just one step
-function (ram::RAM)(x, l_prev, last=false)
+function (ram::RAM)(x, l_prev, h_prev)
     gt = ram.glimpse_net(x, l_prev)
-    gt = reshape(gt, size(gt)..., :)
-    ht = ram.controller(gt)
+    ht = ram.controller(gt, h_prev)
     H, B = size(ht); ht = reshape(ht, H, B)
     μ, lt = ram.location_net(ht)
     bt = ram.baseline_net(ht)
     σ = ram.σ
     σ² = σ .^ 2
-    logπ = -(abs.(lt - μ) .^ 2) / 2σ² .- log(σ) .- log(√2π)
-    logπ = sum(logπ, dims=2)
-    # logp̂ = ifelse(!last, nothing, logp(ram.linear(mat(ht))))
+    logπ = -(abs.(lt - μ) .^ 2) / 2σ² .- log(σ) .- log(√(2π))
+    logπ = sum(logπ, dims=1)
     return ht, lt, bt, logπ
 end
 
 
-# # all timesteps
-# function (ram::RAM)(x)
-#     B = size(x)[end]
-#     lt, ht = initstates(ram, B)
+# all timesteps
+function (ram::RAM)(x)
+    B = size(x)[end]
+    lt, ht = initstates(ram, B)
+    # ram.controller.h = ht
+    xs, locations, logπs, baselines = [], [], [], []
+    for t = 1:ram.num_glimpses
+        ht, lt, bt, logπ = ram(x, lt, ht)
+        push!(locations, lt)
+        push!(baselines, bt)
+        push!(logπs, logπ)
+    end
+    baseline, logπ = vcat(baselines...), vcat(logπs...)
+    scores = ram.softmax_layer(mat(ht))
+    return scores, baseline, logπ, locations
+end
 
-#     xs = []
-#     locations = []
-#     logπs = []
-#     baselines = []
-# end
 
+# loss
+function (ram::RAM)(x, y::Union{Array{Int64}, Array{UInt8}})
+    atype = artype(ram)
+    etype = eltype(ram)
+    scores, baseline, logπ, locations = ram(x)
+    empty!(ram.locations); ram.locations = locations
+    ŷ = vec(map(i->i[1], argmax(Array(value(scores)), dims=1)))
+    R = convert(atype{etype}, ŷ .== y); R = reshape(R, 1, :)
+    R̂ = R .- value(baseline)
+    loss_action = nll(scores, y)
+    loss_baseline = sum(baseline .* R) / length(y)
+    loss_reinforce = mean(sum(-logπ .* R̂, dims=1), dims=2)
+    loss = loss_action .+ loss_baseline .+ loss_reinforce
+    return loss_action, loss_baseline, loss_reinforce
+end
+
+
+(ram::RAM)(d::Knet.Data) = mean(ram(x,y) for (x,y) in d)
 
 function initstates(ram::RAM, B)
     etype, atype = eltype(ram), artype(ram)
@@ -72,12 +116,13 @@ function initstates(ram::RAM, B)
 end
 
 
-eltype(ram::RAM) = eltype(ram.controller.w.value)
+eltype(ram::RAM) = eltype(ram.softmax_layer.w.value)
 artype(ram::RAM) = ifelse(
-    typeof(ram.controller.w.value) <: KnetArray,
+    typeof(ram.softmax_layer.w.value) <: KnetArray,
     KnetArray,
     Array)
-get_hsize(ram::RAM) = ram.controller.hiddenSize
+# get_hsize(ram::RAM) = ram.controller.hiddenSize
+get_hsize(ram::RAM) = size(ram.controller.i2h.w)[1]
 get_lsize(ram::RAM) = size(ram.location_net.layer.w)[1]
 
 
@@ -127,6 +172,8 @@ end
 function (r::Retina)(x, l)
     phi = []
     sz = r.patch_size
+    atype = typeof(l) <: KnetArray ? KnetArray : Array
+    etype = eltype(l)
 
     for k = 1:r.num_patches
         push!(phi, r(x, l, sz))
@@ -139,7 +186,7 @@ function (r::Retina)(x, l)
     end
 
     phi2d = map(mat, phi)
-    return mat(vcat(phi2d...))
+    return atype{etype}(mat(vcat(phi2d...)))
 end
 
 
@@ -150,8 +197,8 @@ function (r::Retina)(x, l, k)
     H, W, C, B = size(x)
     coords = denormalize(H, l)
 
-    patch_x = coords[1,:] .- div(k,2)
-    patch_y = coords[2,:] .- div(k,2)
+    patch_x = coords[1,:] .- div(k,2) .+ 1.
+    patch_y = coords[2,:] .- div(k,2) .+ 1.
 
     patches = []
     atype = typeof(x) <: KnetArray ? KnetArray : Array
@@ -200,13 +247,13 @@ end
 
 
 function LocationNet(input_size::Int, output_size::Int, σ)
-    layer = Linear(input_size, output_size)
+    layer = FullyConnected(input_size, output_size, tanh)
     return LocationNet(σ, layer)
 end
 
 
 function (m::LocationNet)(ht)
-    μ = m.layer(ht)
+    μ = m.layer(value(ht))
     noise = randn!(similar(μ))
     lt = μ .+ noise .* m.σ
     return μ, tanh.(lt)
