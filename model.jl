@@ -8,22 +8,19 @@ using Statistics
 struct Chain; layers; end
 (c::Chain)(x) = (for l in c.layers; x = l(x); end; x)
 
+
 mutable struct VanillaRNN
     i2h
     h2h
 end
 
 
-VanillaRNN(input_size::Int, hidden_size::Int) = VanillaRNN(
-    Linear(input_size, hidden_size; bias=false),
-    Linear(hidden_size, hidden_size; bias=false))
-
-
-function (m::VanillaRNN)(x, h)
-    i2h = m.i2h(x)
-    h2h = m.h2h(h)
-    relu.(i2h .+ h2h)
+function VanillaRNN(xsize::Int, hsize::Int)
+    return VanillaRNN(Linear(xsize, hsize), Linear(hsize, hsize))
 end
+
+
+(m::VanillaRNN)(x, ht) = relu.(m.i2h(x) + m.h2h(ht))
 
 
 mutable struct RAM
@@ -35,6 +32,7 @@ mutable struct RAM
     softmax_layer
     baseline_net
     locations
+    history
 end
 
 
@@ -50,7 +48,8 @@ function RAM(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
         LocationNet(hidden_size, 2, σ),
         Linear(hidden_size, num_classes),
         BaselineNet(hidden_size, 1),
-        [])
+        [],
+        zeros(6)) # 1-3=>loss,4=>iter,5=>correct,6=># of samples
 end
 
 
@@ -74,16 +73,16 @@ function (ram::RAM)(x)
     B = size(x)[end]
     lt, ht = initstates(ram, B)
     # ram.controller.h = ht
-    xs, locations, logπs, baselines = [], [], [], []
+    xs, logπs, baselines, ram.locations = [], [], [], []
     for t = 1:ram.num_glimpses
         ht, lt, bt, logπ = ram(x, lt, ht)
-        push!(locations, lt)
+        push!(ram.locations, lt)
         push!(baselines, bt)
         push!(logπs, logπ)
     end
     baseline, logπ = vcat(baselines...), vcat(logπs...)
     scores = ram.softmax_layer(mat(ht))
-    return scores, baseline, logπ, locations
+    return scores, baseline, logπ, ht
 end
 
 
@@ -91,26 +90,43 @@ end
 function (ram::RAM)(x, y::Union{Array{Int64}, Array{UInt8}})
     atype = artype(ram)
     etype = eltype(ram)
-    scores, baseline, logπ, locations = ram(x)
-    empty!(ram.locations); ram.locations = locations
+    scores, baseline, logπ, ht = ram(x)
     ŷ = vec(map(i->i[1], argmax(Array(value(scores)), dims=1)))
-    R = convert(atype{etype}, ŷ .== y); R = reshape(R, 1, :)
+    r = ŷ .== y; r = reshape(r, 1, :)
+    R = zeros(Float32, size(baseline)...); R[end,:] = r
+    R = convert(atype{etype}, R)
     R̂ = R .- value(baseline)
     loss_action = nll(scores, y)
-    loss_baseline = sum(baseline .* R) / length(y)
-    loss_reinforce = mean(sum(-logπ .* R̂, dims=1), dims=2)
-    loss = loss_action .+ loss_baseline .+ loss_reinforce
-    return loss_action, loss_baseline, loss_reinforce
+    loss_baseline = sum(abs2, baseline .- R) / length(baseline)
+    loss_reinforce = mean(sum(-logπ .* R̂, dims=1))
+    return loss_action, loss_baseline, loss_reinforce, sum(R), length(R)
+end
+loss(x, ygold) = sum(ram(x,ygold)[1:3])
+
+(ram::RAM)(d::Knet.Data) = mean(sum(ram(x,y)[1:3]) for (x,y) in d)
+
+
+function validate(ram::RAM, data)
+    losses = zeros(3)
+    ncorrect = ninstances = 0
+    for (x,y) in data
+        ret = ram(x,y)
+        for i = 1:3; losses[i] += ret[i]; end
+        ncorrect += ret[4]
+        ninstances += ret[5]
+    end
+    losses = losses / length(data)
+    losses = [sum(losses), losses...]
+    return losses, ncorrect / ninstances
 end
 
-
-(ram::RAM)(d::Knet.Data) = mean(ram(x,y) for (x,y) in d)
 
 function initstates(ram::RAM, B)
     etype, atype = eltype(ram), artype(ram)
     hsize = get_hsize(ram)
     lsize = get_lsize(ram)
-    l₀ = atype(2rand(etype, lsize, B) .- 1)
+    # l₀ = atype(2rand(etype, lsize, B) .- 1)
+    l₀ = atype(zeros(etype, lsize, B))
     h₀ = atype(zeros(etype, hsize, B))
     return l₀, h₀
 end
@@ -122,7 +138,7 @@ artype(ram::RAM) = ifelse(
     KnetArray,
     Array)
 # get_hsize(ram::RAM) = ram.controller.hiddenSize
-get_hsize(ram::RAM) = size(ram.controller.i2h.w)[1]
+get_hsize(ram::RAM) = size(ram.controller.h2h.w)[1]
 get_lsize(ram::RAM) = size(ram.location_net.layer.w)[1]
 
 
@@ -150,6 +166,9 @@ end
 function (m::GlimpseNet)(x, loc_t_prev)
     phi = m.retina(x, loc_t_prev)
     loc_t_prev = mat(loc_t_prev)
+    atype = typeof(m.fc1.w.value) <: KnetArray ? KnetArray : Array
+    etype = eltype(m.fc1.w.value)
+    phi = atype{etype}(phi)
     yphi = m.fc1(phi)
     yloc = m.fc2(loc_t_prev)
     y = m.fc3(yphi)
@@ -217,12 +236,9 @@ function (r::Retina)(x, l, k)
             pd = div(sz,2)+1
             padded = zeros(2pd+W, 2pd+H, C, 1)
             from_x += pd+1; to_x += pd+1; from_y += pd+1; to_y += pd+1
-            # padded[from_x:to_x, from_y:to_y, :, :] = Array(img)
             padded[pd+1:pd+W, pd+1:pd+H, :, :] = img
             img = padded
         end
-
-        # TODO: check to see whether x any are mixed
         push!(patches, img[from_x:to_x,from_y:to_y,:,:])
     end
 
@@ -231,7 +247,7 @@ end
 
 
 function denormalize(T, coords)
-    return convert(Array{Int}, round.(0.5T * (coords .+ 1.0)))
+    return convert(Array{Int}, floor.(0.5T * (coords .+ 1.0)))
 end
 
 
