@@ -43,8 +43,7 @@ function RAM(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
         num_glimpses,
         GlimpseNet(loc_hidden, glimpse_hidden, patch_size,
                    num_patches, glimpse_scale, num_channels),
-        # RNN(hidden_size, hidden_size; rnnType=:relu),
-        VanillaRNN(hidden_size, hidden_size),
+        RNN(hidden_size, hidden_size; rnnType=:relu),
         LocationNet(hidden_size, 2, σ),
         Linear(hidden_size, num_classes),
         BaselineNet(hidden_size, 1),
@@ -54,9 +53,9 @@ end
 
 
 # just one step
-function (ram::RAM)(x, l_prev, h_prev)
-    gt = ram.glimpse_net(x, l_prev)
-    ht = ram.controller(gt, h_prev)
+function (ram::RAM)(x, lt, ht)
+    gt = ram.glimpse_net(x, lt)
+    ht = ram.controller(gt)
     H, B = size(ht); ht = reshape(ht, H, B)
     μ, lt = ram.location_net(ht)
     bt = ram.baseline_net(ht)
@@ -72,7 +71,7 @@ end
 function (ram::RAM)(x)
     B = size(x)[end]
     lt, ht = initstates(ram, B)
-    # ram.controller.h = ht
+    ram.controller.h = 0
     xs, logπs, baselines, ram.locations = [], [], [], []
     for t = 1:ram.num_glimpses
         ht, lt, bt, logπ = ram(x, lt, ht)
@@ -125,8 +124,8 @@ function initstates(ram::RAM, B)
     etype, atype = eltype(ram), artype(ram)
     hsize = get_hsize(ram)
     lsize = get_lsize(ram)
-    # l₀ = atype(2rand(etype, lsize, B) .- 1)
-    l₀ = atype(zeros(etype, lsize, B))
+    l₀ = atype(2rand(etype, lsize, B) .- 1)
+    # l₀ = atype(zeros(etype, lsize, B))
     h₀ = atype(zeros(etype, hsize, B))
     return l₀, h₀
 end
@@ -137,8 +136,9 @@ artype(ram::RAM) = ifelse(
     typeof(ram.softmax_layer.w.value) <: KnetArray,
     KnetArray,
     Array)
-# get_hsize(ram::RAM) = ram.controller.hiddenSize
-get_hsize(ram::RAM) = size(ram.controller.h2h.w)[1]
+get_hsize(ram::RAM) = ram.controller.hiddenSize
+get_hsize(m::RNN) = m.hiddenSize
+get_hsize(m::VanillaRNN) = size(m.h2h.w)[1]
 get_lsize(ram::RAM) = size(ram.location_net.layer.w)[1]
 
 
@@ -163,14 +163,14 @@ function GlimpseNet(
 end
 
 
-function (m::GlimpseNet)(x, loc_t_prev)
-    phi = m.retina(x, loc_t_prev)
-    loc_t_prev = mat(loc_t_prev)
+function (m::GlimpseNet)(x, lt)
+    phi = m.retina(x, lt)
+    lt = mat(lt)
     atype = typeof(m.fc1.w.value) <: KnetArray ? KnetArray : Array
     etype = eltype(m.fc1.w.value)
     phi = atype{etype}(phi)
     yphi = m.fc1(phi)
-    yloc = m.fc2(loc_t_prev)
+    yloc = m.fc2(lt)
     y = m.fc3(yphi)
     l = m.fc4(yloc)
     return relu.(y+l)
@@ -272,6 +272,8 @@ function (m::LocationNet)(ht)
     μ = m.layer(value(ht))
     noise = randn!(similar(μ))
     lt = μ .+ noise .* m.σ
+    # noise = g_noise
+    # lt = μ .+ noise
     return μ, tanh.(lt)
 end
 
