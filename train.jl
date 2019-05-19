@@ -1,9 +1,11 @@
-include("model.jl")
+# includet("model.jl")
+# include("model.jl")
 include(Knet.dir("data", "mnist.jl"))
 using Plots
 using ArgParse
 using Dates
 
+atype = gpu() >= 0 ? KnetArray{Float64} : Array{Float64}
 
 function main(args="")
     s = ArgParseSettings()
@@ -14,10 +16,10 @@ function main(args="")
         ("--epochs"; help="# of epochs"; arg_type=Int; default=2000)
         ("--batchsize"; help="batch size"; arg_type=Int; default=256)
         ("--seed"; help="random seed"; arg_type=Int; default=-1)
-        ("--atype"; help="array type"; default=string(Sloth._atype))
-        ("--lr"; help="learning rate"; arg_type=Float64; default=3e-4)
-        ("--gclip"; help="gradient clip"; arg_type=Float64; default=0.)
-        ("--optim"; help="optimizer"; default="adam")
+        ("--atype"; help="array type"; default=string(atype))
+        ("--lr"; help="learning rate"; arg_type=Float64; default=1e-3)
+        ("--gclip"; help="gradient clip"; arg_type=Float64; default=5.)
+        ("--optim"; help="optimizer"; default="rmsprop")
         ("--savefile"; help="save file"; default=nothing)
         ("--loadfile"; help="load file"; default=nothing)
         ("--checkpoint"; help="checkpoint file"; default=nothing)
@@ -59,8 +61,7 @@ function main(args="")
         o[:sigma],
         o[:hiddensize],
         o[:num_classes],
-        o[:num_glimpses],
-    )
+        o[:num_glimpses]; atype=o[:atype])
 
     dtrn = minibatch(xtrn, ytrn, o[:batchsize]; xtype=o[:atype])
     dtst = minibatch(xtst, ytst, o[:batchsize]; xtype=o[:atype])

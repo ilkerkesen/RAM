@@ -15,8 +15,9 @@ mutable struct VanillaRNN
 end
 
 
-function VanillaRNN(xsize::Int, hsize::Int)
-    return VanillaRNN(Linear(xsize, hsize), Linear(hsize, hsize))
+function VanillaRNN(xsize::Int, hsize::Int; atype=Sloth._atype)
+    return VanillaRNN(Linear(xsize, hsize; atype=atype),
+                      Linear(hsize, hsize; atype=atype))
 end
 
 
@@ -37,25 +38,31 @@ end
 
 
 function RAM(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
-             glimpse_hidden, σ, hidden_size, num_classes, num_glimpses)
+             glimpse_hidden, σ, hidden_size, num_classes, num_glimpses;
+             atype=Sloth._atype)
+    usegpu = atype <: KnetArray
+    etype = eltype(atype)
     return RAM(
         σ,
         num_glimpses,
         GlimpseNet(loc_hidden, glimpse_hidden, patch_size,
-                   num_patches, glimpse_scale, num_channels),
-        RNN(hidden_size, hidden_size; rnnType=:relu),
-        LocationNet(hidden_size, 2, σ),
-        Linear(hidden_size, num_classes),
-        BaselineNet(hidden_size, 1),
+                   num_patches, glimpse_scale, num_channels; atype=atype),
+        # RNN(hidden_size, hidden_size;
+        #     rnnType=:relu, usegpu=usegpu, dataType=etype),
+        VanillaRNN(hidden_size, hidden_size; atype=atype),
+        LocationNet(hidden_size, 2, σ; atype=atype),
+        Linear(hidden_size, num_classes; atype=atype),
+        BaselineNet(hidden_size, 1; atype=atype),
         [],
         zeros(6)) # 1-3=>loss,4=>iter,5=>correct,6=># of samples
 end
 
 
 # just one step
-function (ram::RAM)(x, lt, ht)
-    gt = ram.glimpse_net(x, lt)
-    ht = ram.controller(gt)
+function (ram::RAM)(x, ltprev, htprev)
+    gt = ram.glimpse_net(x, ltprev)
+    ht = ram.controller(gt, htprev)
+    # ht = ram.controller.h
     H, B = size(ht); ht = reshape(ht, H, B)
     μ, lt = ram.location_net(ht)
     bt = ram.baseline_net(ht)
@@ -71,8 +78,8 @@ end
 function (ram::RAM)(x)
     B = size(x)[end]
     lt, ht = initstates(ram, B)
-    ram.controller.h = 0
-    xs, logπs, baselines, ram.locations = [], [], [], []
+    # ram.controller.h = 0
+    xs, logπs, baselines, ram.locations = [], [], [], Any[lt]
     for t = 1:ram.num_glimpses
         ht, lt, bt, logπ = ram(x, lt, ht)
         push!(ram.locations, lt)
@@ -136,7 +143,7 @@ artype(ram::RAM) = ifelse(
     typeof(ram.softmax_layer.w.value) <: KnetArray,
     KnetArray,
     Array)
-get_hsize(ram::RAM) = ram.controller.hiddenSize
+get_hsize(ram::RAM) = get_hsize(ram.controller)
 get_hsize(m::RNN) = m.hiddenSize
 get_hsize(m::VanillaRNN) = size(m.h2h.w)[1]
 get_lsize(ram::RAM) = size(ram.location_net.layer.w)[1]
@@ -152,13 +159,15 @@ end
 
 
 function GlimpseNet(
-    loc_hidden, glimpse_hidden, patch_size, num_patches, scale, num_channels)
+    loc_hidden, glimpse_hidden, patch_size, num_patches, scale, num_channels;
+    atype=Sloth._atype)
     retina = Retina(patch_size, num_patches, scale)
     fc1 = FullyConnected(
-        patch_size*patch_size*num_patches*num_channels, glimpse_hidden)
-    fc2 = FullyConnected(2, loc_hidden)
-    fc3 = Linear(glimpse_hidden, glimpse_hidden+loc_hidden)
-    fc4 = Linear(loc_hidden, glimpse_hidden+loc_hidden)
+        patch_size*patch_size*num_patches*num_channels, glimpse_hidden;
+        atype=atype)
+    fc2 = FullyConnected(2, loc_hidden; atype=atype)
+    fc3 = Linear(glimpse_hidden, glimpse_hidden+loc_hidden; atype=atype)
+    fc4 = Linear(loc_hidden, glimpse_hidden+loc_hidden; atype=atype)
     return GlimpseNet(fc1, fc2, fc3, fc4, retina)
 end
 
@@ -262,18 +271,16 @@ mutable struct LocationNet
 end
 
 
-function LocationNet(input_size::Int, output_size::Int, σ)
-    layer = FullyConnected(input_size, output_size, tanh)
+function LocationNet(input_size::Int, output_size::Int, σ; atype=Sloth._atype)
+    layer = FullyConnected(input_size, output_size, tanh; atype=atype)
     return LocationNet(σ, layer)
 end
 
 
 function (m::LocationNet)(ht)
     μ = m.layer(value(ht))
-    noise = randn!(similar(μ))
-    lt = μ .+ noise .* m.σ
-    # noise = g_noise
-    # lt = μ .+ noise
+    etype = eltype(μ)
+    lt = μ .+ etype(m.σ) .* randn!(similar(μ))
     return μ, tanh.(lt)
 end
 
