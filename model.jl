@@ -59,8 +59,9 @@ end
 
 
 # just one step
-function (ram::RAM)(x, ltprev, htprev)
+function (ram::RAM)(x, ltprev, htprev, ret=false)
     gt = ram.glimpse_net(x, ltprev)
+    # ht = ram.controller(gt, htprev)
     ht = ram.controller(gt, htprev)
     # ht = ram.controller.h
     H, B = size(ht); ht = reshape(ht, H, B)
@@ -81,7 +82,10 @@ function (ram::RAM)(x)
     # ram.controller.h = 0
     xs, logπs, baselines, ram.locations = [], [], [], Any[lt]
     for t = 1:ram.num_glimpses
-        ht, lt, bt, logπ = ram(x, lt, ht)
+        if t == -1
+            return ram(x, lt, ht, true)
+        end
+        ht, lt, bt, logπ = ram(x, lt, ht, false)
         push!(ram.locations, lt)
         push!(baselines, bt)
         push!(logπs, logπ)
@@ -99,8 +103,9 @@ function (ram::RAM)(x, y::Union{Array{Int64}, Array{UInt8}})
     scores, baseline, logπ, ht = ram(x)
     ŷ = vec(map(i->i[1], argmax(Array(value(scores)), dims=1)))
     r = ŷ .== y; r = reshape(r, 1, :)
-    R = zeros(Float32, size(baseline)...); R[end,:] = r
-    R = convert(atype{etype}, R)
+    R = convert(atype{etype}, r)
+    # R = zeros(Float32, size(baseline)...); R[end,:] = r
+    # R = convert(atype{etype}, R)
     R̂ = R .- value(baseline)
     loss_action = nll(scores, y)
     loss_baseline = sum(abs2, baseline .- R) / length(baseline)
@@ -131,8 +136,8 @@ function initstates(ram::RAM, B)
     etype, atype = eltype(ram), artype(ram)
     hsize = get_hsize(ram)
     lsize = get_lsize(ram)
-    l₀ = atype(2rand(etype, lsize, B) .- 1)
-    # l₀ = atype(zeros(etype, lsize, B))
+    # l₀ = atype(2rand(etype, lsize, B) .- 1)
+    l₀ = atype(zeros(etype, lsize, B))
     h₀ = atype(zeros(etype, hsize, B))
     return l₀, h₀
 end
@@ -219,10 +224,10 @@ end
 
 
 # extract patch
-# size(x) = H,W,C,B
+# size(x) = W,H,C,B
 # size(l) = 2,B
 function (r::Retina)(x, l, k)
-    H, W, C, B = size(x)
+    W, H, C, B = size(x)
     coords = denormalize(H, l)
 
     patch_x = coords[1,:] .- div(k,2) .+ 1.
@@ -233,7 +238,7 @@ function (r::Retina)(x, l, k)
     etype = eltype(x)
     x2d = mat(x)
     for i = 1:B
-        img = reshape(x2d[:, i:i], H, W, C, 1)
+        img = reshape(x2d[:, i:i], W, H, C, 1)
         img = Array(img)
         T = size(img)[1]
 
@@ -280,7 +285,10 @@ end
 function (m::LocationNet)(ht)
     μ = m.layer(value(ht))
     etype = eltype(μ)
-    lt = μ .+ etype(m.σ) .* randn!(similar(μ))
+    # lt = μ .+ etype(m.σ) .* randn!(similar(μ))
+    # noise = g_noise
+    noise = m.σ .* randn!(similar(μ))
+    lt = μ + noise
     return μ, tanh.(lt)
 end
 
