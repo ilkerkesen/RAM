@@ -136,8 +136,8 @@ function initstates(ram::RAM, B)
     etype, atype = eltype(ram), artype(ram)
     hsize = get_hsize(ram)
     lsize = get_lsize(ram)
-    # l₀ = atype(2rand(etype, lsize, B) .- 1)
-    l₀ = atype(zeros(etype, lsize, B))
+    l₀ = atype(2rand(etype, lsize, B) .- 1)
+    # l₀ = atype(zeros(etype, lsize, B))
     h₀ = atype(zeros(etype, hsize, B))
     return l₀, h₀
 end
