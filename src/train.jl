@@ -10,6 +10,8 @@ function train(args="")
     s.description = "RAM implementation in Knet."
 
     @add_arg_table s begin
+        ("--name"; help="experiment name"; default=nothing; required=true)
+        ("--savedir"; help="checkpoint save directory"; default=SAVEDIR)
         ("--epochs"; help="# of epochs"; arg_type=Int; default=2000)
         ("--batchsize"; help="batch size"; arg_type=Int; default=256)
         ("--seed"; help="random seed"; arg_type=Int; default=-1)
@@ -17,9 +19,7 @@ function train(args="")
         ("--lr"; help="learning rate"; arg_type=Float64; default=1e-4)
         ("--gclip"; help="gradient clip"; arg_type=Float64; default=5.)
         ("--optim"; help="optimizer"; default="rmsprop")
-        ("--savefile"; help="save file"; default=nothing)
         ("--loadfile"; help="load file"; default=nothing)
-        ("--checkpoint"; help="checkpoint file"; default=nothing)
         ("--sigma"; help="std dev"; arg_type=Float64; default=.22)
         ("--patchsize"; help="patch size"; arg_type=Int; default=8)
         ("--num-patches"; help="# of patches"; arg_type=Int; default=1)
@@ -37,6 +37,7 @@ function train(args="")
 
     isa(args, AbstractString) && (args=split(args))
     o = parse_args(args, s; as_symbols=true)
+    o[:epochs] == -1 && return o
     @info "Options parsed [$(now())]"
     println(o); flush(stdout)
     o[:atype] = eval(Meta.parse(o[:atype]))
@@ -60,6 +61,8 @@ function train(args="")
     dtrn = minibatch(xtrn, ytrn, o[:batchsize]; xtype=o[:atype])
     dtst = minibatch(xtst, ytst, o[:batchsize]; xtype=o[:atype])
 
+    bestmodel_path = abspath(joinpath(o[:savedir], o[:name]*"-best.jld2"))
+    lastmodel_path = abspath(joinpath(o[:savedir], o[:name]*"-last.jld2"))
     history = []
     bestacc = 0.0
     o[:loadfile] != nothing && Knet.@load o[:loadfile] ram history
@@ -73,11 +76,11 @@ function train(args="")
             "trnloss=$(trn_losses), trnacc=$trn_acc, ",
             "tstloss=$(tst_losses), tstacc=$tst_acc")
         push!(history, ([trn_losses..., trn_acc, tst_losses..., tst_acc]))
-        o[:checkpoint] != nothing && Knet.@save o[:checkpoint] ram history o
+        Knet.@save lastmodel_path ram history o
 
         if tst_acc > bestacc
             bestacc = tst_acc
-            o[:savefile] != nothing && Knet.@save o[:savefile] ram history o
+            Knet.@save bestmodel_path ram history o
         end
     end
 end
