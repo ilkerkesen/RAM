@@ -2,3 +2,18 @@ name = "RAM"
 uuid = "bf214bdc-85f4-11e9-1ca3-895e27ce660b"
 authors = ["Ilker Kesen <ilkerksn@gmail.com>"]
 version = "0.1.0"
+
+[deps]
+ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+FileIO = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+Images = "916415d5-f1e6-5110-898d-aaa5f9f070e0"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+Knet = "1902f260-5fb4-5aff-8c31-6271790ab950"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+NPZ = "15e1cf62-19b3-5cfa-8e77-841668bca605"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Sloth = "599f0d3e-fa5b-11e8-3d5f-e1ebc21cfa8f"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"

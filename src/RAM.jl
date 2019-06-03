@@ -1,5 +1,6 @@
 module RAM
 
-greet() = print("Hello World!")
+include("model.jl")
+include("train.jl")
 
 end # module

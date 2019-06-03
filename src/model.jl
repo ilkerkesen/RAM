@@ -5,6 +5,12 @@ using Random
 using Statistics
 
 
+function clip(x)
+    x = max.(0, x)
+    x = min.(1, x)
+end
+
+
 struct Chain; layers; end
 (c::Chain)(x) = (for l in c.layers; x = l(x); end; x)
 
@@ -24,7 +30,7 @@ end
 (m::VanillaRNN)(x, ht) = relu.(m.i2h(x) + m.h2h(ht))
 
 
-mutable struct RAM
+mutable struct Net
     σ
     num_glimpses
     glimpse_net
@@ -37,12 +43,12 @@ mutable struct RAM
 end
 
 
-function RAM(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
+function Net(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
              glimpse_hidden, σ, hidden_size, num_classes, num_glimpses;
              atype=Sloth._atype)
     usegpu = atype <: KnetArray
     etype = eltype(atype)
-    return RAM(
+    return Net(
         σ,
         num_glimpses,
         GlimpseNet(loc_hidden, glimpse_hidden, patch_size,
@@ -52,21 +58,21 @@ function RAM(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
         VanillaRNN(hidden_size, hidden_size; atype=atype),
         LocationNet(hidden_size, 2, σ; atype=atype),
         Linear(hidden_size, num_classes; atype=atype),
-        BaselineNet(hidden_size, 1; atype=atype),
+        BaselineNet(hidden_size, 1, identity; atype=atype),
         [],
         zeros(6)) # 1-3=>loss,4=>iter,5=>correct,6=># of samples
 end
 
 
 # just one step
-function (ram::RAM)(x, ltprev, htprev, ret=false)
+function (ram::Net)(x, ltprev, htprev, ret=false)
     gt = ram.glimpse_net(x, ltprev)
     # ht = ram.controller(gt, htprev)
     ht = ram.controller(gt, htprev)
     # ht = ram.controller.h
     H, B = size(ht); ht = reshape(ht, H, B)
     μ, lt = ram.location_net(ht)
-    bt = ram.baseline_net(ht)
+    bt = clip(ram.baseline_net(value(ht)))
     σ = ram.σ
     σ² = σ .^ 2
     logπ = -(abs.(lt - μ) .^ 2) / 2σ² .- log(σ) .- log(√(2π))
@@ -76,16 +82,13 @@ end
 
 
 # all timesteps
-function (ram::RAM)(x)
+function (ram::Net)(x)
     B = size(x)[end]
     lt, ht = initstates(ram, B)
     # ram.controller.h = 0
     xs, logπs, baselines, ram.locations = [], [], [], Any[lt]
     for t = 1:ram.num_glimpses
-        if t == -1
-            return ram(x, lt, ht, true)
-        end
-        ht, lt, bt, logπ = ram(x, lt, ht, false)
+        ht, lt, bt, logπ = ram(x, lt, ht)
         push!(ram.locations, lt)
         push!(baselines, bt)
         push!(logπs, logπ)
@@ -97,27 +100,26 @@ end
 
 
 # loss
-function (ram::RAM)(x, y::Union{Array{Int64}, Array{UInt8}})
+function (ram::Net)(x, y::Union{Array{Int64}, Array{UInt8}})
     atype = artype(ram)
     etype = eltype(ram)
     scores, baseline, logπ, ht = ram(x)
     ŷ = vec(map(i->i[1], argmax(Array(value(scores)), dims=1)))
     r = ŷ .== y; r = reshape(r, 1, :)
-    R = convert(atype{etype}, r)
-    # R = zeros(Float32, size(baseline)...); R[end,:] = r
-    # R = convert(atype{etype}, R)
+    # R = convert(atype{etype}, r)
+    R = zeros(Float32, size(baseline)...); R[end,:] = r
+    R = convert(atype{etype}, R)
     R̂ = R .- value(baseline)
     loss_action = nll(scores, y)
     loss_baseline = sum(abs2, baseline .- R) / length(baseline)
     loss_reinforce = mean(sum(-logπ .* R̂, dims=1))
-    return loss_action, loss_baseline, loss_reinforce, sum(R), length(R)
+    return loss_action, loss_baseline, loss_reinforce, sum(r), length(r)
 end
-loss(x, ygold) = sum(ram(x,ygold)[1:3])
+loss(ram::Net, x, ygold) = sum(ram(x,ygold)[1:3])
+loss(ram::Net, d::Knet.Data) = mean(sum(ram(x,y)[1:3]) for (x,y) in d)
 
-(ram::RAM)(d::Knet.Data) = mean(sum(ram(x,y)[1:3]) for (x,y) in d)
 
-
-function validate(ram::RAM, data)
+function validate(ram::Net, data)
     losses = zeros(3)
     ncorrect = ninstances = 0
     for (x,y) in data
@@ -132,7 +134,7 @@ function validate(ram::RAM, data)
 end
 
 
-function initstates(ram::RAM, B)
+function initstates(ram::Net, B)
     etype, atype = eltype(ram), artype(ram)
     hsize = get_hsize(ram)
     lsize = get_lsize(ram)
@@ -143,15 +145,15 @@ function initstates(ram::RAM, B)
 end
 
 
-eltype(ram::RAM) = eltype(ram.softmax_layer.w.value)
-artype(ram::RAM) = ifelse(
+eltype(ram::Net) = eltype(ram.softmax_layer.w.value)
+artype(ram::Net) = ifelse(
     typeof(ram.softmax_layer.w.value) <: KnetArray,
     KnetArray,
     Array)
-get_hsize(ram::RAM) = get_hsize(ram.controller)
+get_hsize(ram::Net) = get_hsize(ram.controller)
 get_hsize(m::RNN) = m.hiddenSize
 get_hsize(m::VanillaRNN) = size(m.h2h.w)[1]
-get_lsize(ram::RAM) = size(ram.location_net.layer.w)[1]
+get_lsize(ram::Net) = size(ram.location_net.layer.w)[1]
 
 
 mutable struct GlimpseNet
@@ -277,19 +279,16 @@ end
 
 
 function LocationNet(input_size::Int, output_size::Int, σ; atype=Sloth._atype)
-    layer = FullyConnected(input_size, output_size, tanh; atype=atype)
+    layer = FullyConnected(input_size, output_size, clip; atype=atype)
     return LocationNet(σ, layer)
 end
 
 
 function (m::LocationNet)(ht)
-    μ = m.layer(value(ht))
-    etype = eltype(μ)
-    # lt = μ .+ etype(m.σ) .* randn!(similar(μ))
-    # noise = g_noise
+    μ = clip(m.layer(value(ht)))
     noise = m.σ .* randn!(similar(μ))
     lt = μ + noise
-    return μ, tanh.(lt)
+    return μ, clip(lt)
 end
 
 
