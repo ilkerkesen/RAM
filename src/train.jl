@@ -17,9 +17,10 @@ function train(args="")
         ("--seed"; help="random seed"; arg_type=Int; default=-1)
         ("--atype"; help="array type"; default=string(atype))
         ("--lr"; help="learning rate"; arg_type=Float64; default=1e-4)
-        ("--gclip"; help="gradient clip"; arg_type=Float64; default=5.)
+        ("--gclip"; help="gradient clip"; arg_type=Float64; default=0.1)
         ("--optim"; help="optimizer"; default="rmsprop")
         ("--loadfile"; help="load file"; default=nothing)
+        ("--init"; help="init function"; default="randinit")
         ("--sigma"; help="std dev"; arg_type=Float64; default=.22)
         ("--patchsize"; help="patch size"; arg_type=Int; default=8)
         ("--num-patches"; help="# of patches"; arg_type=Int; default=1)
@@ -32,17 +33,20 @@ function train(args="")
          default=128)
         ("--hiddensize"; help="# of units in contoller rnn"; arg_type=Int;
          default=256)
+        ("--rnntype"; help="type of controller (relu|lstm)"; default=":relu")
         ("--num-classes"; help="# of classes"; arg_type=Int; default=10)
     end
 
     isa(args, AbstractString) && (args=split(args))
     o = parse_args(args, s; as_symbols=true)
-    o[:epochs] == -1 && return o
     @info "Options parsed [$(now())]"
     println(o); flush(stdout)
     o[:atype] = eval(Meta.parse(o[:atype]))
     o[:seed] > 0 && Knet.seed!(o[:seed])
     optim = eval(Meta.parse(o[:optim]))
+    o[:init] = eval(Meta.parse(o[:init]))
+    o[:rnntype] = eval(Meta.parse(o[:rnntype]))
+    o[:epochs] == -1 && return o
 
     xtrn, ytrn, xtst, ytst = mnist()
 
@@ -56,7 +60,7 @@ function train(args="")
         o[:sigma],
         o[:hiddensize],
         o[:num_classes],
-        o[:num_glimpses]; atype=o[:atype])
+        o[:num_glimpses]; rnnType=o[:rnntype], atype=o[:atype], init=o[:init])
 
     dtrn = minibatch(xtrn, ytrn, o[:batchsize]; xtype=o[:atype])
     dtst = minibatch(xtst, ytst, o[:batchsize]; xtype=o[:atype])
