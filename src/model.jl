@@ -117,9 +117,9 @@ function (ram::Net)(x, y::Union{Array{Int64}, Array{UInt8}})
     scores, baseline, logπ, _ = ram(x)
     ŷ = vec(map(i->i[1], argmax(Array(value(scores)), dims=1)))
     r = ŷ .== y; r = reshape(r, 1, :)
-    # R = convert(atype{etype}, r)
-    R = zeros(Float32, size(baseline)...); R[end,:] = r
-    R = convert(atype{etype}, R)
+    R = convert(atype{etype}, r)
+    # R = zeros(Float32, size(baseline)...); R[end,:] = r
+    # R = convert(atype{etype}, R)
     R̂ = R .- value(baseline)
     loss_action = nll(scores, y)
     loss_baseline = sum(abs2, baseline .- R) / length(baseline)
