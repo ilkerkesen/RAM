@@ -80,11 +80,12 @@ function (ram::Net)(x, ltprev)
     H, B = size(ht); ht = reshape(ht, H, B)
     μ, lt = ram.location_net(ht)
     bt = clip(ram.baseline_net(value(ht)))
-    σ = ram.σ
+    F = eltype(gt)
+    σ = F(ram.σ)
     σ² = σ .^ 2
-    logπ = -(abs.(lt - μ) .^ 2) / 2σ² .- log(σ) .- log(√(2π))
+    logπ = -(abs.(lt - μ) .^ 2) / 2σ² .- log(σ) .- log(√(F(2)π))
     logπ = sum(logπ, dims=1)
-    return ht, lt, bt, logπ
+    return lt, bt, logπ
 end
 
 
@@ -94,16 +95,18 @@ function (ram::Net)(x)
     lt, ht = initstates(ram, B)
     ram.controller.h = 0
     ram.controller.c = 0
-    xs, logπs, baselines, ram.locations = [], [], [], Any[lt]
+    logπs, baselines, locations = [], [], Any[lt]
     for t = 1:ram.num_glimpses
-        ht, lt, bt, logπ = ram(x, lt)
-        push!(ram.locations, lt)
+        lt, bt, logπ = ram(x, lt)
+        push!(locations, lt)
         push!(baselines, bt)
         push!(logπs, logπ)
     end
     baseline, logπ = vcat(baselines...), vcat(logπs...)
+    ht = ram.controller.h
+    H, B = size(ht); ht = reshape(ht, H, B)
     scores = ram.softmax_layer(mat(ht))
-    return scores, baseline, logπ, ht
+    return scores, baseline, logπ, locations
 end
 
 
@@ -111,7 +114,7 @@ end
 function (ram::Net)(x, y::Union{Array{Int64}, Array{UInt8}})
     atype = artype(ram)
     etype = eltype(ram)
-    scores, baseline, logπ, ht = ram(x)
+    scores, baseline, logπ, _ = ram(x)
     ŷ = vec(map(i->i[1], argmax(Array(value(scores)), dims=1)))
     r = ŷ .== y; r = reshape(r, 1, :)
     # R = convert(atype{etype}, r)
@@ -298,7 +301,8 @@ end
 
 function (m::LocationNet)(ht)
     μ = clip(m.layer(value(ht)))
-    noise = m.σ .* randn!(similar(μ))
+    F = eltype(μ)
+    noise = F(m.σ) .* randn!(similar(μ))
     lt = μ + noise
     return μ, clip(lt)
 end
