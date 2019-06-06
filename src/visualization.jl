@@ -19,7 +19,7 @@ function unrolled_view(images...)
 end
 
 
-function draw_glimpse(img, location, patchsize=8)
+function draw_glimpse(img, location, patchsize=8; correct=true)
     W, H, C = size(img)[1:3]
     x = reshape(img, W, H, C)
     if C == 1
@@ -27,14 +27,21 @@ function draw_glimpse(img, location, patchsize=8)
     end
     x0, y0, x1, y1 = get_patch_locations(location; W=W, H=H,
                                          patchsize=patchsize)
-    x[x0:x1,[y0,y1],1] .= 1.0;
-    x[x0:x1,[y0,y1],2:3] .= 0.0;
-    x[[x0,x1],y0:y1,1] .= 1.0;
-    x[[x0,x1],y0:y1,2:3] .= 0.0;
+    if !correct
+        x[x0:x1,[y0,y1],1] .= 1.0;
+        x[x0:x1,[y0,y1],2:3] .= 0.0;
+        x[[x0,x1],y0:y1,1] .= 1.0;
+        x[[x0,x1],y0:y1,2:3] .= 0.0;
+    else
+        x[x0:x1,[y0,y1],[1,3]] .= 0.0;
+        x[x0:x1,[y0,y1],2] .= 1.0;
+        x[[x0,x1],y0:y1,[1,3]] .= 0.0;
+        x[[x0,x1],y0:y1,2] .= 1.0;
+    end
     return x
 end
 
 
-function draw_glimpses(img, locations, patchsize=8)
-    map(li->draw_glimpse(img,li,patchsize), locations)
+function draw_glimpses(img, locations, patchsize=8; correct=true)
+    map(li->draw_glimpse(img,li,patchsize; correct=correct), locations)
 end
