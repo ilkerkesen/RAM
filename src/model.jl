@@ -72,7 +72,7 @@ end
 
 
 # one step
-function (ram::Net)(x, ltprev)
+function (ram::Net)(x, ltprev; deterministic=false)
     gt = ram.glimpse_net(x, ltprev)
     ram.controller(gt)
     ht = ram.controller.h
@@ -84,19 +84,23 @@ function (ram::Net)(x, ltprev)
     σ² = σ .^ 2
     logπ = -(abs.(lt - μ) .^ 2) / 2σ² .- log(σ) .- log(√(F(2)π))
     logπ = sum(logπ, dims=1)
+
+    if deterministic
+        lt = μ
+    end
     return lt, bt, logπ
 end
 
 
 # all timesteps
-function (ram::Net)(x)
+function (ram::Net)(x; deterministic=false, centered=false)
     B = size(x)[end]
-    lt, ht = initstates(ram, B)
+    lt, ht = initstates(ram, B; centered=centered)
     ram.controller.h = 0
     ram.controller.c = 0
     logπs, baselines, locations = [], [], Any[lt]
     for t = 1:ram.num_glimpses
-        lt, bt, logπ = ram(x, lt)
+        lt, bt, logπ = ram(x, lt; deterministic=deterministic)
         push!(locations, lt)
         push!(baselines, bt)
         push!(logπs, logπ)
@@ -110,10 +114,12 @@ end
 
 
 # loss
-function (ram::Net)(x, y::Union{Array{Int64}, Array{UInt8}})
+function (ram::Net)(x, y::Union{Array{Int64}, Array{UInt8}};
+                    deterministic=false, centered=false)
     atype = artype(ram)
     etype = eltype(ram)
-    scores, baseline, logπ, locations = ram(x)
+    scores, baseline, logπ, locations = ram(
+        x; deterministic=deterministic, centered=centered)
     grid = exploration(ram, locations)
     rate = reshape(mean(grid .> 0, dims=(1,2)), 1, :);
     ŷ = vec(map(i->i[1], argmax(Array(value(scores)), dims=1)))
@@ -132,11 +138,11 @@ loss(ram::Net, x, ygold) = sum(ram(x,ygold)[1:3])
 loss(ram::Net, d::Knet.Data) = mean(sum(ram(x,y)[1:3]) for (x,y) in d)
 
 
-function validate(ram::Net, data)
+function validate(ram::Net, data; deterministic=false, centered=false)
     losses = zeros(3)
     ncorrect = ninstances = 0
     for (x,y) in data
-        ret = ram(x,y)
+        ret = ram(x,y; deterministic=deterministic, centered=centered)
         for i = 1:3; losses[i] += ret[i]; end
         ncorrect += ret[4]
         ninstances += ret[5]
@@ -147,12 +153,14 @@ function validate(ram::Net, data)
 end
 
 
-function initstates(ram::Net, B)
+function initstates(ram::Net, B; centered=false)
     etype, atype = eltype(ram), artype(ram)
     hsize = get_hsize(ram)
     lsize = get_lsize(ram)
     l₀ = atype{etype}(2rand(lsize, B) .- 1)
-    # l₀ = atype(zeros(etype, lsize, B))
+    if centered
+        l₀ = atype(zeros(etype, lsize, B))
+    end
     h₀ = atype{etype}(zeros(hsize, B))
     return l₀, h₀
 end
