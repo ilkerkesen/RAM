@@ -28,8 +28,8 @@ end
 
 
 function VanillaRNN(xsize::Int, hsize::Int; atype=Sloth._atype, init=xavier)
-    return VanillaRNN(Linear(xsize, hsize; atype=atype),
-                      Linear(hsize, hsize; atype=atype))
+    return VanillaRNN(Linear(input=xsize, output=hsize, atype=atype),
+                      Linear(input=hsize, output=hsize, atype=atype))
 end
 
 
@@ -54,7 +54,6 @@ function Net(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
              rnnType=:relu, atype=Sloth._atype, init=randinit)
     usegpu = atype <: KnetArray
     etype = eltype(atype)
-    @show rnnType
     return Net(
         σ,
         num_glimpses,
@@ -65,14 +64,14 @@ function Net(patch_size, num_patches, glimpse_scale, num_channels, loc_hidden,
             rnnType=rnnType, usegpu=usegpu, dataType=etype, winit=init),
         # VanillaRNN(hidden_size, hidden_size; atype=atype, init=init),
         LocationNet(hidden_size, 2, σ; atype=atype, init=init),
-        Linear(hidden_size, num_classes; atype=atype, init=init),
-        BaselineNet(hidden_size, 1, identity; atype=atype, init=init),
+        Linear(input=hidden_size, output=num_classes, atype=atype, init=init),
+        BaselineNet(input=hidden_size, output=1, atype=atype, init=init),
         [],
         zeros(6)) # 1-3=>loss,4=>iter,5=>correct,6=># of samples
 end
 
 
-# just one step
+# one step
 function (ram::Net)(x, ltprev)
     gt = ram.glimpse_net(x, ltprev)
     ram.controller(gt)
@@ -114,9 +113,12 @@ end
 function (ram::Net)(x, y::Union{Array{Int64}, Array{UInt8}})
     atype = artype(ram)
     etype = eltype(ram)
-    scores, baseline, logπ, _ = ram(x)
+    scores, baseline, logπ, locations = ram(x)
+    grid = exploration(ram, locations)
+    rate = reshape(mean(grid .> 0, dims=(1,2)), 1, :);
     ŷ = vec(map(i->i[1], argmax(Array(value(scores)), dims=1)))
     r = ŷ .== y; r = reshape(r, 1, :)
+    # r = r .+ rate;
     R = convert(atype{etype}, r)
     # R = zeros(Float32, size(baseline)...); R[end,:] = r
     # R = convert(atype{etype}, R)
@@ -180,13 +182,14 @@ function GlimpseNet(
     loc_hidden, glimpse_hidden, patch_size, num_patches, scale, num_channels;
     atype=Sloth._atype, init=randinit)
     retina = Retina(patch_size, num_patches, scale)
-    fc1 = FullyConnected(
-        patch_size*patch_size*num_patches*num_channels, glimpse_hidden;
-        atype=atype, init=init)
-    fc2 = FullyConnected(2, loc_hidden; atype=atype, init=init)
-    fc3 = Linear(glimpse_hidden, glimpse_hidden+loc_hidden;
+    fc1 = Dense(
+        input=patch_size*patch_size*num_patches*num_channels,
+        output=glimpse_hidden, atype=atype, init=init)
+    fc2 = Dense(input=2, output=loc_hidden, atype=atype, init=init)
+    fc3 = Linear(input=glimpse_hidden, output=glimpse_hidden+loc_hidden,
                  atype=atype, init=init)
-    fc4 = Linear(loc_hidden, glimpse_hidden+loc_hidden; atype=atype, init=init)
+    fc4 = Linear(input=loc_hidden, output=glimpse_hidden+loc_hidden,
+                 atype=atype, init=init)
     return GlimpseNet(fc1, fc2, fc3, fc4, retina)
 end
 
@@ -201,7 +204,7 @@ function (m::GlimpseNet)(x, lt)
     yloc = m.fc2(lt)
     y = m.fc3(yphi)
     l = m.fc4(yloc)
-    return relu.(y+l)
+    return relu.(y .* l)
 end
 
 
@@ -293,8 +296,8 @@ end
 
 function LocationNet(input_size::Int, output_size::Int, σ;
                      atype=Sloth._atype, init=randinit)
-    layer = FullyConnected(input_size, output_size, clip;
-                           atype=atype, init=init)
+    layer = Dense(input=input_size, output=output_size, f=clip,
+                  atype=atype, init=init)
     return LocationNet(σ, layer)
 end
 
@@ -308,4 +311,4 @@ function (m::LocationNet)(ht)
 end
 
 
-BaselineNet = FullyConnected
+BaselineNet = Linear
